@@ -11,6 +11,6 @@
   "clangd.arguments": [
     "--background-index",
     "--query-driver=**",
-    "--compile-commands-dir=c:\\Users\\Brend\\Downloads\\testing\\testin2\\build"
+    "--compile-commands-dir=c:\\Users\\Brend\\Documents\\GitHub\\ESP-Reflow-Oven\\build"
   ]
 }
