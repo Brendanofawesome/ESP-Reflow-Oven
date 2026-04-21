@@ -39,7 +39,7 @@ typedef struct {
 	const uint16_t buffersize;
 } display_controller_config_t;
 
-esp_err_t display_init(spi_host_device_t* host_id, display_controller_config_t* config);
+esp_err_t display_init(spi_host_device_t host_id, display_controller_config_t* config);
 
 typedef struct {
 	esp_lcd_touch_handle_t spi_host;
@@ -52,14 +52,20 @@ typedef struct {
 	const int pin_num_touch_int;
 	const int pin_num_touch_rst;
 
+	const uint16_t touch_hres;
+	const uint16_t touch_vres;
+
     const uint16_t y_min;
     const uint16_t y_max;
     const uint16_t x_min;
     const uint16_t x_max;
+
+	uint32_t _x_scaling_factor_frac8;
+	uint32_t _y_scaling_factor_frac8;
 
 	const bool touch_swap_xy;
 	const bool touch_mirror_x;
 	const bool touch_mirror_y;
 } touch_controller_config_t;
 
-esp_err_t touch_init(spi_host_device_t* host_id, touch_controller_config_t* config);
+esp_err_t touch_init(spi_host_device_t host_id, touch_controller_config_t* config);

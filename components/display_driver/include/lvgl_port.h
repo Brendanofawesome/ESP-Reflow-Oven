@@ -78,8 +78,6 @@ typedef struct {
  * Pass a valid out_handles pointer and keep the returned handles for later UI
  * work and shutdown. If host_id is NULL, SPI2_HOST is used.
  *
- * @param host_id SPI host to use for both display and touch. Pass NULL to use
- *                SPI2_HOST.
  * @param display_config Hardware settings for the LCD panel and backlight.
  * @param touch_config Hardware settings for the XPT2046 touch controller.
  * @param port_config Optional LVGL task/buffer settings. Pass NULL to use
@@ -91,8 +89,7 @@ typedef struct {
  *      - ESP_ERR_INVALID_ARG if required arguments are NULL
  *      - Any hardware or LVGL adapter error returned by the underlying APIs
  */
-esp_err_t lvgl_port_init(spi_host_device_t* host_id,
-						 display_controller_config_t* display_config,
+esp_err_t lvgl_port_init(display_controller_config_t* display_config,
 						 touch_controller_config_t* touch_config,
 						 const lvgl_port_config_t* port_config,
 						 lvgl_port_handles_t* out_handles);
