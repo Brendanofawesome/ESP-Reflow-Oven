@@ -80,10 +80,10 @@ void app_main(void)
     lvgl_port_handles_t handles = { 0 };
     
     ESP_LOGI(LOG_TAG, "Bringing up LCD");
-    ESP_ERROR_CHECK(display_init(SPI2_HOST, &display_config));
+    ESP_ERROR_CHECK(display_init(SPI3_HOST, &display_config));
 
     ESP_LOGI(LOG_TAG, "Bringing up touchscreen");
-    ESP_ERROR_CHECK(touch_init(SPI3_HOST, &touch_config));
+    ESP_ERROR_CHECK(touch_init(SPI2_HOST, &touch_config));
 
     ESP_LOGI(LOG_TAG, "Bringing up LVGL");
     ESP_ERROR_CHECK(lvgl_port_init(&display_config, &touch_config, &lvgl_config, &handles));
