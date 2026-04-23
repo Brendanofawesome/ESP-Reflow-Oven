@@ -94,7 +94,7 @@ static void auto_asynchronous_receive(void* arg){
     vTaskDelete(NULL);
 }
 
-esp_err_t max_31856_init(spi_host_device_t bus, const int cs_pin, max_31856_t* max_31856, max_31856_async_type async_type){
+esp_err_t max_31856_init(spi_host_device_t bus, const int cs_pin, max_31856_t* max_31856, max_31856_async_type async_type, uint16_t ms_refresh_rate){
     if (max_31856 == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -111,12 +111,12 @@ esp_err_t max_31856_init(spi_host_device_t bus, const int cs_pin, max_31856_t* m
         return ESP_ERR_NO_MEM;
     }
     xSemaphoreGive(max_31856->in_flight);
-    max_31856->delay_ticks = pdMS_TO_TICKS(200); //update every 200ms
+    max_31856->delay_ticks = pdMS_TO_TICKS(ms_refresh_rate);
 
     memset(&max_31856->static_temp_retrieve_tx, 0, sizeof(max_31856->static_temp_retrieve_tx));
     max_31856->static_temp_retrieve_tx.addr = 0x0C & 0x7F;
     max_31856->static_temp_retrieve_tx.flags = SPI_TRANS_USE_RXDATA;
-    max_31856->static_temp_retrieve_tx.rxlength = 8 * 4;
+    max_31856->static_temp_retrieve_tx.rxlength = 8 * 4; //4-byte read
     
     //create device configuration
     spi_device_interface_config_t device_config = {
@@ -150,14 +150,14 @@ esp_err_t max_31856_init(spi_host_device_t bus, const int cs_pin, max_31856_t* m
 
     //configuration settings
     const uint8_t conf_tx_data[] = {
-        0b10100100,  //configuration register 0: {automatic mode, no one shot, open/short detection enabled, CJ enabled, interrupt fault mode, 60Hz rejection}
+        0b10100110,  //configuration register 0: {automatic mode, no one shot, open/short detection enabled, CJ enabled, comparator fault mode, clr faults, 60Hz rejection}
         0b00100011,  //configuration register 1: {4 sample average, K type probe}
         0b00000000,  //enable all fault conditions
         max_cj,      //max cold-side temp 
-        min_cj,     //min cold-side temp
-        0x00,        //no temperature offset
+        min_cj,      //min cold-side temp
         (max_tc >> 8), (max_tc & 0xFF), //max temp
         (min_tc >> 8), (min_tc & 0xFF), //min temp
+        0x00         //no cold junction offset
     };
 
     //write configuration registers
@@ -190,13 +190,22 @@ esp_err_t max_31856_init(spi_host_device_t bus, const int cs_pin, max_31856_t* m
 
     //ensure that the configuration registers were set correctly
     bool config_correct = true;
+    
+    //mask off one-shot configuration registers
+    uint8_t expected_data[sizeof(conf_tx_data)];
+    memcpy(expected_data, conf_tx_data, sizeof(conf_tx_data));
+
+    expected_data[0] &= 0b10111101; //one-shot and faultclr bits
+    expected_data[2] = (conf_tx_data[2] & 0b00111111) | (rx_buf[2] & 0b11000000);
+
+
     for(size_t x = 0; x < sizeof(conf_tx_data)/sizeof(conf_tx_data[0]); x++){
         
-        if(conf_tx_data[x] != rx_buf[x]){
+        if(expected_data[x] != rx_buf[x]){
             config_correct = false;
-            ESP_LOGE(LOG_TAG, "Wrote: 0x%02X at reg %d -> Read: 0x%02X at ; Expected: ", conf_tx_data[x], x, rx_buf[x]);
+            ESP_LOGE(LOG_TAG, "Wrote: 0x%02X at reg %02X -> Expected: 0x%02X, Read: 0x%02X", conf_tx_data[x], x, expected_data[x], rx_buf[x]);
         } else {
-            ESP_LOGI(LOG_TAG, "Wrote: 0x%02X at reg %d -> Read: 0x%02X at ; Expected: ", conf_tx_data[x], x, rx_buf[x]);
+            ESP_LOGI(LOG_TAG, "Wrote: 0x%02X at reg %02X -> Expected: 0x%02X, Read: 0x%02X", conf_tx_data[x], x, expected_data[x], rx_buf[x]);
         }
     }
 
@@ -207,7 +216,7 @@ esp_err_t max_31856_init(spi_host_device_t bus, const int cs_pin, max_31856_t* m
     }
 
     BaseType_t task_ok;
-    if(async_type == MANUAL){
+    if(async_type == MAX31856_MANUAL){
         ESP_LOGI(LOG_TAG, "starting max_31856 driver in manual refresh mode");
         task_ok = xTaskCreate(
             manual_asynchronous_receive,
@@ -293,7 +302,7 @@ esp_err_t max_31856_update_temp_blocking(max_31856_t* max_31856){
     }
 
     //special logic if auto mode is in use -> immediately read and update
-    if (max_31856->async_type == AUTO) {
+    if (max_31856->async_type == MAX31856_AUTO) {
         if (xSemaphoreTake(max_31856->in_flight, 0) == pdFALSE) { //auto is currently reading -> just wait for it to finish
             if(xSemaphoreTake(max_31856->in_flight, pdMS_TO_TICKS(1000)) == pdFALSE){ // wait for it to finish
                 return ESP_ERR_TIMEOUT;
@@ -350,7 +359,7 @@ esp_err_t max_31856_update_temp_async(max_31856_t* max_31856, uint32_t timeout_m
     }
 
     //update is already enqueued if auto is selected
-    if (max_31856->async_type == AUTO) {
+    if (max_31856->async_type == MAX31856_AUTO) {
         return ESP_OK;
     }
 

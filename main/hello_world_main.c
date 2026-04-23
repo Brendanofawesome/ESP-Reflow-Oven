@@ -22,7 +22,7 @@
 #define SPI_MOSI_PIN 32
 #define SPI_MISO_PIN 39
 #define SPI_CLK_PIN 25
-#define SENSOR_CS_PIN 22
+#define SENSOR_CS_PIN 27
 #define CONTROL_PIN 33
 
 static const char* LOG_TAG = "app_main";
@@ -61,7 +61,7 @@ void app_main(void)
     max_31856_t temperature_sensor;
     ESP_LOGI(LOG_TAG, "Initializing MAX31856 temperature sensor");
     
-    ret = max_31856_init(SPI2_HOST, SENSOR_CS_PIN, &temperature_sensor, AUTO);
+    ret = max_31856_init(SPI2_HOST, SENSOR_CS_PIN, &temperature_sensor, MAX31856_AUTO, 500);
     if (ret != ESP_OK) {
         ESP_LOGE(LOG_TAG, "Failed to initialize MAX31856: %s", esp_err_to_name(ret));
         spi_bus_free(SPI2_HOST);
@@ -70,15 +70,15 @@ void app_main(void)
     
     ESP_LOGI(LOG_TAG, "Sensor initialized successfully. Starting monitoring at 60Hz");
     
-    // Main loop: read and print temperature and faults at 60Hz (every ~16.67ms)
-    const TickType_t delay_ticks = pdMS_TO_TICKS(1000 / 60);  // 16.67ms for 60Hz
+    // Main loop: read and print temperature and faults
+    const TickType_t delay_ticks = pdMS_TO_TICKS(1000);  // 16.67ms for 60Hz
     
     while (true) {
         uint8_t flags = 0;
         float temperature = max_31856_get_temperature_c(&temperature_sensor, &flags);
         
         // Print current temperature, last read time (flags), and fault status
-        //printf("Temp: %.2f°C | Faults: 0x%02X\n", temperature, flags);
+        printf("Temp: %.2f°C | Faults: 0x%01X\n", temperature, flags);
         
         vTaskDelay(delay_ticks);
     }

@@ -5,7 +5,7 @@
 
 
 //defines the structure that stores information about the sensor
-typedef enum : bool {MANUAL, AUTO} max_31856_async_type;
+typedef enum : bool {MAX31856_MANUAL, MAX31856_AUTO} max_31856_async_type;
 typedef struct max_31856_t {
     //data definitions
     spi_device_handle_t device_SPI_handle;
@@ -27,7 +27,7 @@ typedef struct max_31856_t {
 } max_31856_t;
 
 //initialize a max_31856 struct and verify connection to the SPI device
-esp_err_t max_31856_init(spi_host_device_t bus, const int cs_pin, max_31856_t* max_31856, max_31856_async_type async_type);
+esp_err_t max_31856_init(spi_host_device_t bus, const int cs_pin, max_31856_t* max_31856, max_31856_async_type async_type, uint16_t refresh_rate);
 
 //release resources and detach the sensor from SPI bus
 esp_err_t max_31856_deinit(max_31856_t* max_31856);
