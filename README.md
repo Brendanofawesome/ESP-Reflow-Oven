@@ -3,7 +3,7 @@ A DIY ESP32 Based Reflow Oven. Designed with modular components so that hardware
 
 # Goals!  
 1. [] pytest Automated Tests
-2. [] Temperature Reading  
+2. [x] Temperature Reading  
 3. [] SSR Control  
 4. [] Zero Voltage Switching  
 5. [] Temperature Control Loop  
