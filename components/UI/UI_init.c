@@ -47,8 +47,8 @@ esp_err_t ui_init(ui_t* ui_data){
     lv_obj_t* settings_screen = lv_tabview_add_tab(tabview, "Settings");
 
     initialize_profiles_screen(profiles_screen, ui_data);
-    initialize_run_screen(profiles_screen, ui_data);
-    initialize_settings_screen(profiles_screen, ui_data);
+    initialize_run_screen(run_screen, ui_data);
+    initialize_settings_screen(settings_screen, ui_data);
 
     //create the bottom bar
     lv_obj_t* bottom_bar = lv_obj_create(screen);
