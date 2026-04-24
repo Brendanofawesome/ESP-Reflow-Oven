@@ -1,7 +1,11 @@
 #include "UI.h"
 #include "esp_log.h"
-#include "fontawesome_solid.c"
-#include "consolas_bold.c"
+#include "fonts/fontawesome_solid.c"
+#include "fonts/consolas_bold.c"
+
+#include "profile_screen.c"
+#include "run_screen.c"
+#include "settings_screen.c"
 
 const char* LOG_TAG = "UI_Controller";
 
@@ -38,9 +42,13 @@ esp_err_t ui_init(ui_t* ui_data){
     lv_obj_set_flex_grow(tabview, 1); //container fills screen
 
     //Create the pages
-    lv_tabview_add_tab(tabview, "Profiles");
-    lv_tabview_add_tab(tabview, "Run");
-    lv_tabview_add_tab(tabview, "Settings");
+    lv_obj_t* profiles_screen = lv_tabview_add_tab(tabview, "Profiles");
+    lv_obj_t* run_screen = lv_tabview_add_tab(tabview, "Run");
+    lv_obj_t* settings_screen = lv_tabview_add_tab(tabview, "Settings");
+
+    initialize_profiles_screen(profiles_screen, ui_data);
+    initialize_run_screen(profiles_screen, ui_data);
+    initialize_settings_screen(profiles_screen, ui_data);
 
     //create the bottom bar
     lv_obj_t* bottom_bar = lv_obj_create(screen);
