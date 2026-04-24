@@ -1,33 +1,15 @@
 #include "max_31856_driver.h"
 
-#include <assert.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
-struct max_31856_t {
-    //data definitions
-    spi_device_handle_t device_SPI_handle;
-    atomic_int_least32_t last_temp_reading;
-    atomic_uint_least8_t last_flags_reading;
-    _Atomic esp_err_t last_SPI_error;
+#include "esp_log.h"
+#include "esp_err.h"
 
-    //asynchronous definitions
-    max_31856_async_type async_type;
-    spi_transaction_t static_temp_retrieve_tx;
-    TaskHandle_t receiver_task;
-    atomic_bool shutdown_requested;
-
-    //manual async
-    SemaphoreHandle_t in_flight;
-
-    //Auto Async
-    uint32_t delay_ticks;
-};
-
-
+const static char* LOG_TAG = "max_31856 Driver";
 
 //manual background reader task
 static void manual_asynchronous_receive(void* arg){
@@ -89,6 +71,10 @@ static void auto_asynchronous_receive(void* arg){
     while(!atomic_load_explicit(&max_31856->shutdown_requested, memory_order_relaxed)){
         vTaskDelay(max_31856->delay_ticks);
 
+        if (atomic_load_explicit(&max_31856->shutdown_requested, memory_order_relaxed)) {
+            break;
+        }
+
         if (xSemaphoreTake(max_31856->in_flight, portMAX_DELAY) != pdTRUE) {
             continue;
         }
@@ -108,8 +94,8 @@ static void auto_asynchronous_receive(void* arg){
     vTaskDelete(NULL);
 }
 
-esp_err_t max_31856_init(spi_host_device_t* bus, const int cs_pin, max_31856_t* max_31856, max_31856_async_type async_type){
-    if (max_31856 == NULL || bus == NULL) {
+esp_err_t max_31856_init(spi_host_device_t bus, const int cs_pin, max_31856_t* max_31856, max_31856_async_type async_type, uint16_t ms_refresh_rate){
+    if (max_31856 == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -125,29 +111,30 @@ esp_err_t max_31856_init(spi_host_device_t* bus, const int cs_pin, max_31856_t* 
         return ESP_ERR_NO_MEM;
     }
     xSemaphoreGive(max_31856->in_flight);
-    max_31856->delay_ticks = pdMS_TO_TICKS(200); //update every 200ms
+    max_31856->delay_ticks = pdMS_TO_TICKS(ms_refresh_rate);
 
     memset(&max_31856->static_temp_retrieve_tx, 0, sizeof(max_31856->static_temp_retrieve_tx));
-    max_31856->static_temp_retrieve_tx.flags = SPI_TRANS_USE_TXDATA | SPI_TRANS_USE_RXDATA;
-    max_31856->static_temp_retrieve_tx.length = 8;
-    max_31856->static_temp_retrieve_tx.rxlength = 8 * 4;
-    max_31856->static_temp_retrieve_tx.tx_data[0] = 0x0C & 0x7F;
+    max_31856->static_temp_retrieve_tx.addr = 0x0C & 0x7F;
+    max_31856->static_temp_retrieve_tx.flags = SPI_TRANS_USE_RXDATA;
+    max_31856->static_temp_retrieve_tx.rxlength = 8 * 4; //4-byte read
     
     //create device configuration
     spi_device_interface_config_t device_config = {
-        .clock_speed_hz = 1 * 1000000,   //5MHz
-        .mode           = 1,            //SPI Mode 1
+        .clock_speed_hz = 5 * 1000 * 1000,   //5MHz
+        .mode           = 1,                 //SPI mode 1
         .spics_io_num   = cs_pin,
         .queue_size     = 1,
 
         .flags          = SPI_DEVICE_HALFDUPLEX,
+
         .command_bits   = 0,
-        .address_bits   = 0,
+        .address_bits   = 8,
         .dummy_bits     = 0
     };
 
     //attatch device to bus
-    esp_err_t err = spi_bus_add_device(*bus, &device_config, &max_31856->device_SPI_handle);
+    ESP_LOGI(LOG_TAG, "attatching device to SPI bus");
+    esp_err_t err = spi_bus_add_device(bus, &device_config, &max_31856->device_SPI_handle);
     if(err != ESP_OK){
         max_31856->device_SPI_handle = NULL;
         vSemaphoreDelete(max_31856->in_flight);
@@ -156,83 +143,111 @@ esp_err_t max_31856_init(spi_host_device_t* bus, const int cs_pin, max_31856_t* 
     }
     
     //temperature limits
-    const uint16_t max_tc = 600 * 16;
-    const uint16_t min_tc = -10 * 16;
-    const uint8_t max_cj = 50;
-    const uint8_t min_cj = -10;
+    const uint16_t max_tc = 600 * 16; //°C * 16
+    const uint16_t min_tc = -10 * 16; //°C * 16
+    const uint8_t max_cj = 50; //°C
+    const uint8_t min_cj = -10; //°C
 
     //configuration settings
     const uint8_t conf_tx_data[] = {
-        0x00 | 0x80, //write to 0x00
-        0b10100100,  //configuration register 0: {automatic mode, no one shot, open/short detection enabled, CJ enabled, interrupt fault mode, 60Hz rejection}
+        0b10100110,  //configuration register 0: {automatic mode, no one shot, open/short detection enabled, CJ enabled, comparator fault mode, clr faults, 60Hz rejection}
         0b00100011,  //configuration register 1: {4 sample average, K type probe}
         0b00000000,  //enable all fault conditions
         max_cj,      //max cold-side temp 
-        -min_cj,     //min cold-side temp
-        0x00,        //no temperature offset
+        min_cj,      //min cold-side temp
         (max_tc >> 8), (max_tc & 0xFF), //max temp
         (min_tc >> 8), (min_tc & 0xFF), //min temp
+        0x00         //no cold junction offset
     };
 
     //write configuration registers
+    ESP_LOGI(LOG_TAG, "writting configuration registers");
     spi_transaction_t conf_tx = {
+        .addr       = 0x00 | 0x80, //start write at 0x00
         .tx_buffer  = conf_tx_data,
         .length     = 8 * sizeof(conf_tx_data),
+        .rx_buffer  = NULL
     };
     err = spi_device_transmit(max_31856->device_SPI_handle, &conf_tx);
     if (err != ESP_OK) {
-        (void)max_31856_deinit(max_31856);
+        max_31856_deinit(max_31856);
         return err;
     }
 
     //readback configuration registers
+    ESP_LOGI(LOG_TAG, "verifying configuration registers");
     uint8_t rx_buf[sizeof(conf_tx_data)/sizeof(conf_tx_data[0])];
     spi_transaction_t conf_rx = {
-        .flags      = SPI_TRANS_USE_TXDATA,
-        .length     = 8,
-        .rxlength   = 8 * sizeof(conf_tx_data)/sizeof(conf_tx_data[0]),
-        .rx_buffer  = &rx_buf,
+        .addr       = 0x00 & 0x7F, //start read at 0x00
+        .rxlength   = 8 * sizeof(conf_tx_data),
+        .rx_buffer  = rx_buf,
     };
     err = spi_device_transmit(max_31856->device_SPI_handle, &conf_rx);
     if (err != ESP_OK) {
-        (void)max_31856_deinit(max_31856);
+        max_31856_deinit(max_31856);
         return err;
     }
 
-    //ensure that they were set correctly
+    //ensure that the configuration registers were set correctly
+    bool config_correct = true;
+    
+    //mask off one-shot configuration registers
+    uint8_t expected_data[sizeof(conf_tx_data)];
+    memcpy(expected_data, conf_tx_data, sizeof(conf_tx_data));
+
+    expected_data[0] &= 0b10111101; //one-shot and faultclr bits
+    expected_data[2] = (conf_tx_data[2] & 0b00111111) | (rx_buf[2] & 0b11000000);
+
+
     for(size_t x = 0; x < sizeof(conf_tx_data)/sizeof(conf_tx_data[0]); x++){
-        assert(conf_tx_data[x] == rx_buf[x]);
+        
+        if(expected_data[x] != rx_buf[x]){
+            config_correct = false;
+            ESP_LOGE(LOG_TAG, "Wrote: 0x%02X at reg %02X -> Expected: 0x%02X, Read: 0x%02X", conf_tx_data[x], x, expected_data[x], rx_buf[x]);
+        } else {
+            ESP_LOGI(LOG_TAG, "Wrote: 0x%02X at reg %02X -> Expected: 0x%02X, Read: 0x%02X", conf_tx_data[x], x, expected_data[x], rx_buf[x]);
+        }
+    }
+
+    if(config_correct == false){
+        ESP_LOGE(LOG_TAG, "Device did not respond correctly to SPI transmission");
+        max_31856_deinit(max_31856);
+        return ESP_ERR_INVALID_RESPONSE;
     }
 
     BaseType_t task_ok;
-    if(async_type == MANUAL){
+    if(async_type == MAX31856_MANUAL){
+        ESP_LOGI(LOG_TAG, "starting max_31856 driver in manual refresh mode");
         task_ok = xTaskCreate(
             manual_asynchronous_receive,
             "max31856_rx",
-            10,
+            1024,
             max_31856,
             tskIDLE_PRIORITY + 1,
             &max_31856->receiver_task
         );
     } else {
+        ESP_LOGI(LOG_TAG, "starting max_31856 driver in automatic refresh mode");
         task_ok = xTaskCreate(
             auto_asynchronous_receive,
             "max31856_rx",
-            10,
+            1024,
             max_31856,
             tskIDLE_PRIORITY + 1,
             &max_31856->receiver_task
         );
     }
     if (task_ok != pdPASS) {
-        (void)max_31856_deinit(max_31856);
+        max_31856_deinit(max_31856);
         return ESP_ERR_NO_MEM;
     }
 
     //get the latest temperature reading
+    ESP_LOGI(LOG_TAG, "initializing temperature reading");
     err = max_31856_update_temp_blocking(max_31856);
     if (err != ESP_OK) {
-        (void)max_31856_deinit(max_31856);
+        ESP_LOGE(LOG_TAG, "failed to get initial temeprature reading");
+        max_31856_deinit(max_31856);
         return err;
     }
 
@@ -287,7 +302,7 @@ esp_err_t max_31856_update_temp_blocking(max_31856_t* max_31856){
     }
 
     //special logic if auto mode is in use -> immediately read and update
-    if (max_31856->async_type == AUTO) {
+    if (max_31856->async_type == MAX31856_AUTO) {
         if (xSemaphoreTake(max_31856->in_flight, 0) == pdFALSE) { //auto is currently reading -> just wait for it to finish
             if(xSemaphoreTake(max_31856->in_flight, pdMS_TO_TICKS(1000)) == pdFALSE){ // wait for it to finish
                 return ESP_ERR_TIMEOUT;
@@ -344,7 +359,7 @@ esp_err_t max_31856_update_temp_async(max_31856_t* max_31856, uint32_t timeout_m
     }
 
     //update is already enqueued if auto is selected
-    if (max_31856->async_type == AUTO) {
+    if (max_31856->async_type == MAX31856_AUTO) {
         return ESP_OK;
     }
 
