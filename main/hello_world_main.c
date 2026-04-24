@@ -1,5 +1,7 @@
 //General Purpose Includes
 #include <stdio.h>
+#include <stdbool.h>
+
 #include "esp_log.h"
 #include "esp_check.h"
 
@@ -12,9 +14,10 @@
 #include "driver/gpio.h"
 
 //UI
-#include "lvgl.h"
 #include "display_driver.h" //custom display initializer
 #include "lvgl_port.h" //custom lvgl library
+#include "UI.h"
+#include "lvgl.h"
 
 //temperature sensor
 #include "max_31856_driver.h" //custom
@@ -43,12 +46,25 @@
 #define TOUCH_INT 36
 
 static const char* LOG_TAG = "app_main";
+max_31856_t temperature_sensor;
+ui_t ui_struct;
+
+//LVGL temperature timer task
+void UI_Update_Temperatures(lv_timer_t* timer){
+    float last_hotside_temp = max_31856_get_temperature_c(&temperature_sensor, NULL, NULL);
+    float target_temp = -1;
+
+    ESP_LOGD(LOG_TAG, "Current Temperature: %3.2f°C", last_hotside_temp);
+
+    ui_set_target_temperature(&ui_struct, target_temp);
+    ui_set_current_temperature(&ui_struct, last_hotside_temp);
+}
 
 
-static void touch_event_handler(lv_event_t *e)
-{
+static void touch_event_debug_handler(lv_event_t *e){
     const lv_event_code_t code = lv_event_get_code(e);
-    if (code != LV_EVENT_PRESSED && code != LV_EVENT_PRESSING && code != LV_EVENT_RELEASED) {
+    if (code != LV_EVENT_PRESSED && code != LV_EVENT_RELEASED) {
+        return;
     }
 
     lv_indev_t *indev = lv_indev_active();
@@ -60,11 +76,9 @@ static void touch_event_handler(lv_event_t *e)
     lv_indev_get_point(indev, &point);
 
     if (code == LV_EVENT_PRESSED) {
-        ESP_LOGI(LOG_TAG, "Touch down at x=%d y=%d", (int)point.x, (int)point.y);
-    } else if (code == LV_EVENT_PRESSING) {
-        ESP_LOGI(LOG_TAG, "Touch move at x=%d y=%d", (int)point.x, (int)point.y);
+        ESP_LOGD(LOG_TAG, "Touch down at x=%d y=%d", (int)point.x, (int)point.y);
     } else {
-        ESP_LOGI(LOG_TAG, "Touch up at x=%d y=%d", (int)point.x, (int)point.y);
+        ESP_LOGD(LOG_TAG, "Touch up at x=%d y=%d", (int)point.x, (int)point.y);
     }
 }
 
@@ -121,29 +135,16 @@ void app_main(void)
     ESP_LOGI(LOG_TAG, "Bringing up touchscreen");
     ESP_ERROR_CHECK(touch_init(AUX_HOST, &touch_config));
 
-    ESP_LOGI(LOG_TAG, "Bringing up LVGL");
+    ESP_LOGI(LOG_TAG, "Bringing up LVGL adapter");
     ESP_ERROR_CHECK(lvgl_port_init(&display_config, &touch_config, &lvgl_config, &handles));
-    
 
-    //verify panel rendering and touch
+    //setup touch debugging
+    ESP_LOGI(LOG_TAG, "Attatching Touch Debug Callback");
     ESP_ERROR_CHECK(lvgl_port_lock(-1));
-    if (handles.touch != NULL) {
-        lv_indev_add_event_cb(handles.touch, touch_event_handler, LV_EVENT_PRESSED, NULL);
-        lv_indev_add_event_cb(handles.touch, touch_event_handler, LV_EVENT_PRESSING, NULL);
-        lv_indev_add_event_cb(handles.touch, touch_event_handler, LV_EVENT_RELEASED, NULL);
-    }
-
-    lv_obj_t *screen = lv_screen_active();
-
-    lv_obj_t *label = lv_label_create(screen);
-    lv_label_set_text(label, "Hello, world!\nLVGL is running.");
-    lv_obj_center(label);
-    lvgl_port_unlock();
-
-    ESP_LOGI(LOG_TAG, "LVGL running");
+    lv_indev_add_event_cb(handles.touch, touch_event_debug_handler,LV_EVENT_PRESSED, NULL);
+    lv_indev_add_event_cb(handles.touch, touch_event_debug_handler, LV_EVENT_RELEASED, NULL);
 
     // Initialize the temperature sensor
-    max_31856_t temperature_sensor;
     ESP_LOGI(LOG_TAG, "Initializing MAX31856 temperature sensor");
     
     esp_err_t ret = max_31856_init(AUX_HOST, MAX31856_CS, &temperature_sensor, MAX31856_AUTO, 500);
@@ -153,22 +154,23 @@ void app_main(void)
     }
     
     ESP_LOGI(LOG_TAG, "Sensor initialized successfully. Starting monitoring at 60Hz");
-    
-    // Main loop: read and print temperature and faults
-    const TickType_t delay_ticks = pdMS_TO_TICKS(1000);
 
-    const char temperature_format_string[] = "Temp: %.2f°C | Faults: 0x%01X";
-    char temperature_buffer[sizeof(temperature_format_string) + 10];
-    
+    ESP_LOGI(LOG_TAG, "Creating UI...");
+    ui_init(&ui_struct);
+
+    //create the temperature update timer
+    ESP_LOGI(LOG_TAG, "attatching the temperature monitor");
+    lv_timer_t* temp_timer = lv_timer_create(UI_Update_Temperatures, 1000/3, NULL);
+    lvgl_port_unlock();
+
+    if (temp_timer == NULL) {
+        ESP_LOGE(LOG_TAG, "Failed to create temperature update timer");
+        return;
+    }
+
+    ESP_LOGI(LOG_TAG, "LVGL worker running; app_main entering idle sleep");
+
     while (true) {
-        uint8_t flags = 0;
-        float temperature = max_31856_get_temperature_c(&temperature_sensor, &flags);
-        
-        // Print current temperature, last read time (flags), and fault status
-        snprintf(temperature_buffer, sizeof(temperature_buffer)/sizeof(temperature_buffer[0]), temperature_format_string, temperature, flags);
-        ESP_LOGI(LOG_TAG, "Grabbed latest temperature from driver: %s, updating display", temperature_buffer);
-        
-        lv_label_set_text(label, temperature_buffer);
-        vTaskDelay(delay_ticks);
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

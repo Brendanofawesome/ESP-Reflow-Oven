@@ -11,6 +11,22 @@
 
 const static char* LOG_TAG = "max_31856 Driver";
 
+static void store_reading_from_rx(max_31856_t* max_31856) {
+    int32_t hotside_reading = ((int32_t)(
+        ((uint32_t)max_31856->rx_buffer[2] << (8 * 3)) |
+        ((uint32_t)max_31856->rx_buffer[3] << (8 * 2)) |
+        ((uint32_t)max_31856->rx_buffer[4] << (8 * 1))
+    )) >> (32 - 19);
+
+    int16_t coldsize_reading = *(uint16_t*)(max_31856->rx_buffer) >> 2;
+
+    uint8_t read_flags = max_31856->rx_buffer[5];
+
+    atomic_store_explicit(&max_31856->last_hotside_temp_reading, hotside_reading, memory_order_relaxed);
+    atomic_store_explicit(&max_31856->last_coldside_temp_reading, coldsize_reading, memory_order_relaxed);
+    atomic_store_explicit(&max_31856->last_flags_reading, read_flags, memory_order_relaxed);
+}
+
 //manual background reader task
 static void manual_asynchronous_receive(void* arg){
     max_31856_t* max_31856 = (max_31856_t*)arg;
@@ -28,16 +44,7 @@ static void manual_asynchronous_receive(void* arg){
         }
 
         if(err == ESP_OK && completed_tx == &max_31856->static_temp_retrieve_tx) {
-            // Get the top 19 bits of the reading and store them.
-            int32_t reading = ((int32_t)(
-                ((uint32_t)max_31856->static_temp_retrieve_tx.rx_data[0] << (8 * 3)) |
-                ((uint32_t)max_31856->static_temp_retrieve_tx.rx_data[1] << (8 * 2)) |
-                ((uint32_t)max_31856->static_temp_retrieve_tx.rx_data[2] << (8 * 1))
-            )) >> (32-19);
-
-            atomic_store_explicit(&max_31856->last_temp_reading, reading, memory_order_relaxed);
-            atomic_store_explicit(&max_31856->last_flags_reading, max_31856->static_temp_retrieve_tx.rx_data[3], memory_order_relaxed);
-            atomic_store_explicit(&max_31856->last_SPI_error, ESP_OK, memory_order_relaxed);
+            store_reading_from_rx(max_31856);
             xSemaphoreGive(max_31856->in_flight);
             continue;
         }
@@ -52,17 +59,6 @@ static void manual_asynchronous_receive(void* arg){
 
     max_31856->receiver_task = NULL;
     vTaskDelete(NULL);
-}
-
-static void store_reading_from_rx(const uint8_t rx_data[4], max_31856_t* max_31856) {
-    int32_t reading = ((int32_t)(
-        ((uint32_t)rx_data[0] << (8 * 3)) |
-        ((uint32_t)rx_data[1] << (8 * 2)) |
-        ((uint32_t)rx_data[2] << (8 * 1))
-    )) >> (32 - 19);
-
-    atomic_store_explicit(&max_31856->last_temp_reading, reading, memory_order_relaxed);
-    atomic_store_explicit(&max_31856->last_flags_reading, rx_data[3], memory_order_relaxed);
 }
 
 static void auto_asynchronous_receive(void* arg){
@@ -84,7 +80,7 @@ static void auto_asynchronous_receive(void* arg){
         atomic_store_explicit(&max_31856->last_SPI_error, err, memory_order_relaxed);
 
         if(err == ESP_OK){
-            store_reading_from_rx(max_31856->static_temp_retrieve_tx.rx_data, max_31856);
+            store_reading_from_rx(max_31856);
         }
 
         xSemaphoreGive(max_31856->in_flight);
@@ -100,7 +96,8 @@ esp_err_t max_31856_init(spi_host_device_t bus, const int cs_pin, max_31856_t* m
     }
 
     memset(max_31856, 0, sizeof(*max_31856));
-    atomic_init(&max_31856->last_temp_reading, 0);
+    atomic_init(&max_31856->last_hotside_temp_reading, 0);
+    atomic_init(&max_31856->last_coldside_temp_reading, 0);
     atomic_init(&max_31856->last_flags_reading, 0);
     atomic_init(&max_31856->last_SPI_error, ESP_OK);
     atomic_init(&max_31856->shutdown_requested, false);
@@ -114,9 +111,9 @@ esp_err_t max_31856_init(spi_host_device_t bus, const int cs_pin, max_31856_t* m
     max_31856->delay_ticks = pdMS_TO_TICKS(ms_refresh_rate);
 
     memset(&max_31856->static_temp_retrieve_tx, 0, sizeof(max_31856->static_temp_retrieve_tx));
-    max_31856->static_temp_retrieve_tx.addr = 0x0C & 0x7F;
-    max_31856->static_temp_retrieve_tx.flags = SPI_TRANS_USE_RXDATA;
-    max_31856->static_temp_retrieve_tx.rxlength = 8 * 4; //4-byte read
+    max_31856->static_temp_retrieve_tx.addr = 0x0A & 0x7F;
+    max_31856->static_temp_retrieve_tx.rxlength = 8 * 6; //6-byte read
+    max_31856->static_temp_retrieve_tx.rx_buffer = max_31856->rx_buffer;
     
     //create device configuration
     spi_device_interface_config_t device_config = {
@@ -151,7 +148,7 @@ esp_err_t max_31856_init(spi_host_device_t bus, const int cs_pin, max_31856_t* m
     //configuration settings
     const uint8_t conf_tx_data[] = {
         0b10100110,  //configuration register 0: {automatic mode, no one shot, open/short detection enabled, CJ enabled, comparator fault mode, clr faults, 60Hz rejection}
-        0b00100011,  //configuration register 1: {4 sample average, K type probe}
+        0b00110011,  //configuration register 1: {8 sample average, K type probe}
         0b00000000,  //enable all fault conditions
         max_cj,      //max cold-side temp 
         min_cj,      //min cold-side temp
@@ -196,7 +193,8 @@ esp_err_t max_31856_init(spi_host_device_t bus, const int cs_pin, max_31856_t* m
     memcpy(expected_data, conf_tx_data, sizeof(conf_tx_data));
 
     expected_data[0] &= 0b10111101; //one-shot and faultclr bits
-    expected_data[2] = (conf_tx_data[2] & 0b00111111) | (rx_buf[2] & 0b11000000);
+    expected_data[1] = (conf_tx_data[1] & 0b01111111) | (rx_buf[1] & 0b10000000); //reserved field
+    expected_data[2] = (conf_tx_data[2] & 0b00111111) | (rx_buf[2] & 0b11000000); //reserved field
 
 
     for(size_t x = 0; x < sizeof(conf_tx_data)/sizeof(conf_tx_data[0]); x++){
@@ -223,7 +221,7 @@ esp_err_t max_31856_init(spi_host_device_t bus, const int cs_pin, max_31856_t* m
             "max31856_rx",
             1024,
             max_31856,
-            tskIDLE_PRIORITY + 1,
+            8,
             &max_31856->receiver_task
         );
     } else {
@@ -233,7 +231,7 @@ esp_err_t max_31856_init(spi_host_device_t bus, const int cs_pin, max_31856_t* m
             "max31856_rx",
             1024,
             max_31856,
-            tskIDLE_PRIORITY + 1,
+            8,
             &max_31856->receiver_task
         );
     }
@@ -316,7 +314,7 @@ esp_err_t max_31856_update_temp_blocking(max_31856_t* max_31856){
         esp_err_t err = spi_device_transmit(max_31856->device_SPI_handle, &max_31856->static_temp_retrieve_tx);
         atomic_store_explicit(&max_31856->last_SPI_error, err, memory_order_relaxed);
         if (err == ESP_OK) {
-            store_reading_from_rx(max_31856->static_temp_retrieve_tx.rx_data, max_31856);
+            store_reading_from_rx(max_31856);
         }
 
         xSemaphoreGive(max_31856->in_flight);
@@ -380,11 +378,12 @@ esp_err_t max_31856_update_temp_async(max_31856_t* max_31856, uint32_t timeout_m
     return err;
 }
 
-float max_31856_get_temperature_c(max_31856_t* max_31856, uint8_t* flags){
+float max_31856_get_temperature_c(max_31856_t* max_31856, uint8_t* flags, float* cold_junction_temp){
     if(max_31856 == NULL) return 0;
 
     if(flags != NULL) *flags = atomic_load_explicit(&max_31856->last_flags_reading, memory_order_relaxed);
-    return (float)atomic_load_explicit(&max_31856->last_temp_reading, memory_order_relaxed) / 128.0;
+    if(cold_junction_temp != NULL) *cold_junction_temp = atomic_load_explicit(&max_31856->last_coldside_temp_reading, memory_order_relaxed) / 64.0;
+    return (float)atomic_load_explicit(&max_31856->last_hotside_temp_reading, memory_order_relaxed) / 128.0;
 }
 
 uint8_t max_31856_get_status(max_31856_t* max_31856){
