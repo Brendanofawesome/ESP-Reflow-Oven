@@ -9,13 +9,15 @@ typedef enum : bool {MAX31856_MANUAL, MAX31856_AUTO} max_31856_async_type;
 typedef struct max_31856_t {
     //data definitions
     spi_device_handle_t device_SPI_handle;
-    atomic_int_least32_t last_temp_reading;
-    atomic_uint_least8_t last_flags_reading;
-    _Atomic esp_err_t last_SPI_error;
+    volatile atomic_int_least16_t last_coldside_temp_reading;
+    volatile atomic_int_least32_t last_hotside_temp_reading;
+    volatile atomic_uint_least8_t last_flags_reading;
+    volatile _Atomic esp_err_t last_SPI_error;
 
     //asynchronous definitions
     max_31856_async_type async_type;
     spi_transaction_t static_temp_retrieve_tx;
+    volatile uint8_t rx_buffer[8];
     TaskHandle_t receiver_task;
     atomic_bool shutdown_requested;
 
@@ -42,4 +44,4 @@ esp_err_t max_31856_update_temp_async(max_31856_t* max_31856, uint32_t timeout_m
 uint8_t max_31856_get_status(max_31856_t* max_31856);
 
 //get latest temperature
-float max_31856_get_temperature_c(max_31856_t* max_31856, uint8_t* flags);
+float max_31856_get_temperature_c(max_31856_t* max_31856, uint8_t* flags, float* cold_junction_temp);
