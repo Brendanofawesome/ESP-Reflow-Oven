@@ -1,6 +1,7 @@
 #pragma once
 #include "esp_err.h"
 #include "lvgl.h"
+#include "profile.h"
 #include <stdint.h>
 //defines and runs the UI
 
@@ -11,6 +12,7 @@ typedef struct ui_t {
     lv_obj_t* current_temperature_label;
     lv_obj_t* target_temperature_label;
     lv_obj_t* content;
+    const profile_t* selected_profile;
 } ui_t;
 
 #define TOPBAR_HEIGHT 50
@@ -20,7 +22,7 @@ typedef struct ui_t {
 esp_err_t ui_init(ui_t* ui_data);
 
 //set the latest current hotside temperature used by the label updater.
-esp_err_t ui_set_current_temperature(ui_t* ui_data, const float temperature_c);
+esp_err_t ui_set_current_temperature(ui_t* ui_data, const float temperature_c, const uint8_t flags);
 
 //set the latest target hotside temperature used by the label updater.
 esp_err_t ui_set_target_temperature(ui_t* ui_data, const float temperature_c);

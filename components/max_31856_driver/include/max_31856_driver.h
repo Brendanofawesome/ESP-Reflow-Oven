@@ -17,7 +17,7 @@ typedef struct max_31856_t {
     //asynchronous definitions
     max_31856_async_type async_type;
     spi_transaction_t static_temp_retrieve_tx;
-    volatile uint8_t rx_buffer[8];
+    uint8_t* rx_buffer;
     TaskHandle_t receiver_task;
     atomic_bool shutdown_requested;
 

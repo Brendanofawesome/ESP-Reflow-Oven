@@ -1,3 +1,5 @@
+#include <math.h> //for isnan()
+
 #include "UI.h"
 #include "esp_log.h"
 #include "fonts/fontawesome_solid.c"
@@ -36,6 +38,7 @@ esp_err_t ui_init(ui_t* ui_data){
 
     //create the content container
     lv_obj_t* tabview = lv_tabview_create(screen);
+    lv_obj_set_style_text_font(tabview, &consolas_bold, 0);
     lv_obj_set_width(tabview, LV_PCT(100)); //fill width
     lv_tabview_set_tab_bar_position(tabview, LV_DIR_TOP); //navigation using top bar
     lv_tabview_set_tab_bar_size(tabview, TOPBAR_HEIGHT); //top bar size
@@ -52,6 +55,7 @@ esp_err_t ui_init(ui_t* ui_data){
 
     //create the bottom bar
     lv_obj_t* bottom_bar = lv_obj_create(screen);
+    lv_obj_set_style_text_font(bottom_bar, &consolas_bold, 0);
     lv_obj_set_width(bottom_bar, LV_PCT(100));
     lv_obj_set_height(bottom_bar, BOTTOMBAR_HEIGHT);
 
@@ -93,13 +97,17 @@ esp_err_t ui_init(ui_t* ui_data){
     return ESP_OK;
 }
 
-esp_err_t ui_set_current_temperature(ui_t* ui_data, const float temperature_c){
+esp_err_t ui_set_current_temperature(ui_t* ui_data, const float temperature_c, const uint8_t flags){
     if(ui_data == NULL){
         ESP_LOGE(LOG_TAG, "Set current temperature called with null data handle");
         return ESP_ERR_INVALID_ARG;
     }
 
-    lv_label_set_text_fmt(ui_data->current_temperature_label, "%3.1f°C", temperature_c);
+    if(isnanf(temperature_c)){
+        lv_label_set_text_fmt(ui_data->current_temperature_label, "ERR(%02x)", flags);
+    } else {
+        lv_label_set_text_fmt(ui_data->current_temperature_label, "%3.1f°C", temperature_c);
+    }
     return ESP_OK;
 }
 
@@ -109,6 +117,11 @@ esp_err_t ui_set_target_temperature(ui_t* ui_data, const float temperature_c){
         return ESP_ERR_INVALID_ARG;
     }
 
-    lv_label_set_text_fmt(ui_data->target_temperature_label, "%3.1f°C", temperature_c);
+    if(isnanf(temperature_c)){
+        lv_label_set_text_static(ui_data->target_temperature_label, "Off");
+    } else {
+        lv_label_set_text_fmt(ui_data->target_temperature_label, "%3.1f°C", temperature_c);
+    }
+
     return ESP_OK;
 }

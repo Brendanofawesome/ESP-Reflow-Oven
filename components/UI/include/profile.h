@@ -22,6 +22,9 @@ typedef struct profile_t {
     uint16_t num_points;
 } profile_t;
 
+extern const profile_t lead_free_profile;
+extern const profile_t leaded_solder_profile;
+
 
 //returns the target temperature
 uint32_t get_target_temperature(uint32_t start_time, uint32_t start_temp, key_point_t* next_point);

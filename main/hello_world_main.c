@@ -1,6 +1,8 @@
 //General Purpose Includes
 #include <stdio.h>
 #include <stdbool.h>
+#include <stdatomic.h>
+#include <math.h> //NaN
 
 #include "esp_log.h"
 #include "esp_check.h"
@@ -22,15 +24,18 @@
 //temperature sensor
 #include "max_31856_driver.h" //custom
 
+//zero-crossing detection
+#include <driver/pulse_cnt.h>
+
 // SPI pin definitions
 //BUS2: Display
-#define LCD_HOST SPI3_HOST
+#define LCD_HOST SPI2_HOST
 #define LCD_SPI_MOSI 13
 #define LCD_MISO 12
 #define LCD_SPI_CLK 14
 
 //BUS3 Touch Controller and Temperature Sensor
-#define AUX_HOST SPI2_HOST
+#define AUX_HOST SPI3_HOST
 #define AUX_MOSI 32
 #define AUX_MISO 39
 #define AUX_CLK 25
@@ -45,19 +50,39 @@
 #define TOUCH_CS 33
 #define TOUCH_INT 36
 
+//Optocoupler
+#define OPTOCOUPLER_PIN 22
+
 static const char* LOG_TAG = "app_main";
+
+//global variables
 max_31856_t temperature_sensor;
 ui_t ui_struct;
+pcnt_unit_handle_t zero_cross_counter;
+
+_Atomic float target_temperature;
+
+//PID Callback
+bool PID_Trigger_calc(pcnt_unit_handle_t unit, const pcnt_watch_event_data_t *edata, void *user_ctx){
+    ESP_DRAM_LOGI(LOG_TAG, "Counted 255 Pulses!");
+    return true;
+}
 
 //LVGL temperature timer task
 void UI_Update_Temperatures(lv_timer_t* timer){
-    float last_hotside_temp = max_31856_get_temperature_c(&temperature_sensor, NULL, NULL);
-    float target_temp = -1;
+    uint8_t flags;
+    float last_hotside_temp = max_31856_get_temperature_c(&temperature_sensor, &flags, NULL);
 
-    ESP_LOGD(LOG_TAG, "Current Temperature: %3.2f°C", last_hotside_temp);
+    if(flags != 0){ //some error was detected
+    //    last_hotside_temp = NAN;
+    }
+
+    float target_temp = atomic_load_explicit(&target_temperature, memory_order_relaxed);
+
+    ESP_LOGD(LOG_TAG, "Read Current Temperature: %3.2f°C, flags: 0x%02x", last_hotside_temp, flags);
 
     ui_set_target_temperature(&ui_struct, target_temp);
-    ui_set_current_temperature(&ui_struct, last_hotside_temp);
+    ui_set_current_temperature(&ui_struct, last_hotside_temp, flags);
 }
 
 
@@ -84,6 +109,8 @@ static void touch_event_debug_handler(lv_event_t *e){
 
 void app_main(void)
 {
+    atomic_init(&target_temperature, NAN);
+
     display_controller_config_t display_config = {
         .device_handle = NULL,
         .io_handle = NULL,
@@ -144,7 +171,7 @@ void app_main(void)
     lv_indev_add_event_cb(handles.touch, touch_event_debug_handler,LV_EVENT_PRESSED, NULL);
     lv_indev_add_event_cb(handles.touch, touch_event_debug_handler, LV_EVENT_RELEASED, NULL);
 
-    // Initialize the temperature sensor
+    //initialize the temperature sensor
     ESP_LOGI(LOG_TAG, "Initializing MAX31856 temperature sensor");
     
     esp_err_t ret = max_31856_init(AUX_HOST, MAX31856_CS, &temperature_sensor, MAX31856_AUTO, 500);
@@ -168,9 +195,72 @@ void app_main(void)
         return;
     }
 
-    ESP_LOGI(LOG_TAG, "LVGL worker running; app_main entering idle sleep");
+    //configure the zero-cross detector using PCNT peripheral
+    ESP_LOGI(LOG_TAG, "creating the zero-cross detector");
+    pcnt_unit_config_t unit_config = {
+        .low_limit = -1,
+        .high_limit = 255,
+        .flags = {
+            .accum_count = false
+        },
+        .intr_priority = 0,
+    };
+    ret = pcnt_new_unit(&unit_config, &zero_cross_counter);
+    if(ret != ESP_OK){
+        ESP_LOGE(LOG_TAG, "Failed to create PCNT unit: %s", esp_err_to_name(ret));
+    }
+
+    ret = pcnt_unit_add_watch_point(zero_cross_counter, 255);
+    if (ret != ESP_OK) {
+        ESP_LOGE(LOG_TAG, "Failed to add PCNT watch point: %s", esp_err_to_name(ret));
+    }
+
+        gpio_config_t io = {
+        .pin_bit_mask = 1ULL << OPTOCOUPLER_PIN,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,   // often needed for optocoupler outputs
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&io));
+
+    pcnt_channel_handle_t pcnt_chan = NULL;
+    pcnt_chan_config_t chan_config = {
+        .edge_gpio_num = OPTOCOUPLER_PIN,
+        .level_gpio_num = -1,
+        .flags = {
+            .virt_level_io_level = 0
+        }
+    };
+    ret = pcnt_new_channel(zero_cross_counter, &chan_config, &pcnt_chan);
+    if(ret != ESP_OK){
+        ESP_LOGE(LOG_TAG, "Failed to create PCNT channel: %s", esp_err_to_name(ret));
+    }
+
+    ret = pcnt_channel_set_edge_action(pcnt_chan, PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_INCREASE);
+    if(ret != ESP_OK){
+        ESP_LOGE(LOG_TAG, "Failed to set PCNT channel edge action: %s", esp_err_to_name(ret));
+    }
+
+    pcnt_event_callbacks_t PID_callback = {.on_reach = PID_Trigger_calc};
+    ret = pcnt_unit_register_event_callbacks(zero_cross_counter, &PID_callback, NULL);
+    if(ret != ESP_OK){
+        ESP_LOGE(LOG_TAG, "Failed to register PCNT event callbacks: %s", esp_err_to_name(ret));
+    }
+
+    ESP_LOGI(LOG_TAG, "Configured pulse counter, starting...");
+
+    pcnt_unit_clear_count(zero_cross_counter);
+    pcnt_unit_enable(zero_cross_counter);
+    ret = pcnt_unit_start(zero_cross_counter);
+    if(ret != ESP_OK){
+        ESP_LOGE(LOG_TAG, "Failed to start PCNT unit: %s", esp_err_to_name(ret));
+    }
+
+
+    ESP_LOGI(LOG_TAG, "LVGL worker running; app_main entering watchdog loop");
 
     while (true) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 }

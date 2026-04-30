@@ -75,7 +75,11 @@ static void auto_asynchronous_receive(void* arg){
             continue;
         }
 
-        esp_err_t err = spi_device_transmit(max_31856->device_SPI_handle, &max_31856->static_temp_retrieve_tx);
+        esp_err_t err = spi_device_queue_trans(max_31856->device_SPI_handle, &max_31856->static_temp_retrieve_tx, portMAX_DELAY);
+
+        spi_transaction_t* completed_tx;
+        err |=spi_device_get_trans_result(max_31856->device_SPI_handle, &completed_tx, portMAX_DELAY);
+
 
         atomic_store_explicit(&max_31856->last_SPI_error, err, memory_order_relaxed);
 
@@ -117,10 +121,10 @@ esp_err_t max_31856_init(spi_host_device_t bus, const int cs_pin, max_31856_t* m
     
     //create device configuration
     spi_device_interface_config_t device_config = {
-        .clock_speed_hz = 5 * 1000 * 1000,   //5MHz
+        .clock_speed_hz = 1 * 1000 * 1000,   //1MHz
         .mode           = 1,                 //SPI mode 1
         .spics_io_num   = cs_pin,
-        .queue_size     = 1,
+        .queue_size     = 10,
 
         .flags          = SPI_DEVICE_HALFDUPLEX,
 
@@ -207,6 +211,8 @@ esp_err_t max_31856_init(spi_host_device_t bus, const int cs_pin, max_31856_t* m
         }
     }
 
+    max_31856->rx_buffer = heap_caps_malloc(8, MALLOC_CAP_DMA);
+
     if(config_correct == false){
         ESP_LOGE(LOG_TAG, "Device did not respond correctly to SPI transmission");
         max_31856_deinit(max_31856);
@@ -216,23 +222,25 @@ esp_err_t max_31856_init(spi_host_device_t bus, const int cs_pin, max_31856_t* m
     BaseType_t task_ok;
     if(async_type == MAX31856_MANUAL){
         ESP_LOGI(LOG_TAG, "starting max_31856 driver in manual refresh mode");
-        task_ok = xTaskCreate(
+        task_ok = xTaskCreatePinnedToCore(
             manual_asynchronous_receive,
             "max31856_rx",
-            1024,
+            4096,
             max_31856,
             8,
-            &max_31856->receiver_task
+            &max_31856->receiver_task,
+            1
         );
     } else {
         ESP_LOGI(LOG_TAG, "starting max_31856 driver in automatic refresh mode");
-        task_ok = xTaskCreate(
+        task_ok = xTaskCreatePinnedToCore(
             auto_asynchronous_receive,
             "max31856_rx",
-            1024,
+            4096,
             max_31856,
             8,
-            &max_31856->receiver_task
+            &max_31856->receiver_task,
+            1
         );
     }
     if (task_ok != pdPASS) {
@@ -253,9 +261,11 @@ esp_err_t max_31856_init(spi_host_device_t bus, const int cs_pin, max_31856_t* m
 }
 
 esp_err_t max_31856_deinit(max_31856_t* max_31856) {
-    if (max_31856 == NULL) {
+    if(max_31856 == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    if(max_31856->rx_buffer) free(max_31856->rx_buffer);
 
     //signal the reciever to stop
     atomic_store_explicit(&max_31856->shutdown_requested, true, memory_order_relaxed);

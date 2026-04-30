@@ -184,7 +184,8 @@ esp_err_t touch_init(spi_host_device_t host_id, touch_controller_config_t* confi
         .mosi_io_num = config->pin_num_mosi,
         .quadhd_io_num = GPIO_NUM_NC,
         .quadwp_io_num = GPIO_NUM_NC,
-        .max_transfer_sz = 0
+        .max_transfer_sz = 0,
+        .isr_cpu_id = 1
     };
     esp_err_t err = spi_bus_initialize(host_id, &buscfg, SPI_DMA_CH_AUTO);
     if(err == ESP_ERR_INVALID_STATE){
