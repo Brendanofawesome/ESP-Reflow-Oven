@@ -75,10 +75,7 @@ static void auto_asynchronous_receive(void* arg){
             continue;
         }
 
-        esp_err_t err = spi_device_queue_trans(max_31856->device_SPI_handle, &max_31856->static_temp_retrieve_tx, portMAX_DELAY);
-
-        spi_transaction_t* completed_tx;
-        err |=spi_device_get_trans_result(max_31856->device_SPI_handle, &completed_tx, portMAX_DELAY);
+        esp_err_t err = spi_device_transmit(max_31856->device_SPI_handle, &max_31856->static_temp_retrieve_tx);
 
 
         atomic_store_explicit(&max_31856->last_SPI_error, err, memory_order_relaxed);
@@ -114,6 +111,13 @@ esp_err_t max_31856_init(spi_host_device_t bus, const int cs_pin, max_31856_t* m
     xSemaphoreGive(max_31856->in_flight);
     max_31856->delay_ticks = pdMS_TO_TICKS(ms_refresh_rate);
 
+    max_31856->rx_buffer = heap_caps_malloc(6, MALLOC_CAP_DMA);
+    if (max_31856->rx_buffer == NULL) {
+        vSemaphoreDelete(max_31856->in_flight);
+        max_31856->in_flight = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+
     memset(&max_31856->static_temp_retrieve_tx, 0, sizeof(max_31856->static_temp_retrieve_tx));
     max_31856->static_temp_retrieve_tx.addr = 0x0A & 0x7F;
     max_31856->static_temp_retrieve_tx.rxlength = 8 * 6; //6-byte read
@@ -130,7 +134,10 @@ esp_err_t max_31856_init(spi_host_device_t bus, const int cs_pin, max_31856_t* m
 
         .command_bits   = 0,
         .address_bits   = 8,
-        .dummy_bits     = 0
+        .dummy_bits     = 0,
+
+        .cs_ena_pretrans = 2,
+        .cs_ena_posttrans = 2,
     };
 
     //attatch device to bus
@@ -210,8 +217,6 @@ esp_err_t max_31856_init(spi_host_device_t bus, const int cs_pin, max_31856_t* m
             ESP_LOGI(LOG_TAG, "Wrote: 0x%02X at reg %02X -> Expected: 0x%02X, Read: 0x%02X", conf_tx_data[x], x, expected_data[x], rx_buf[x]);
         }
     }
-
-    max_31856->rx_buffer = heap_caps_malloc(8, MALLOC_CAP_DMA);
 
     if(config_correct == false){
         ESP_LOGE(LOG_TAG, "Device did not respond correctly to SPI transmission");
