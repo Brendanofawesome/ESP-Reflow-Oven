@@ -18,7 +18,7 @@ static key_point_t leaded_solder_points[] = {
 };
 
 const profile_t lead_free_profile = {
-    .name = "lead_free (SAC305)",
+    .name = "leadfree (SAC305)",
     .points = lead_free_points,
     .num_points = sizeof(lead_free_points) / sizeof(lead_free_points[0])
 };

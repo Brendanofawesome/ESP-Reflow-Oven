@@ -13,8 +13,8 @@ static const profile_t* const PROFILE_OPTIONS[] = {
 typedef struct profile_screen_state_t {
     ui_t* ui_data;
     lv_obj_t* summary_label;
-    lv_obj_t* cards[2];
-    lv_obj_t* detail_labels[2];
+    lv_obj_t* cards[sizeof(PROFILE_OPTIONS) / sizeof(PROFILE_OPTIONS[0])];
+    lv_obj_t* detail_labels[sizeof(PROFILE_OPTIONS) / sizeof(PROFILE_OPTIONS[0])];
     size_t selected_index;
 } profile_screen_state_t;
 
@@ -107,7 +107,7 @@ static void format_duration(uint32_t duration_ms, char* buffer, size_t buffer_si
     uint32_t total_seconds = duration_ms / 1000;
     uint32_t minutes = total_seconds / 60;
     uint32_t seconds = total_seconds % 60;
-    snprintf(buffer, buffer_size, "%02u:%02u", (unsigned)minutes, (unsigned)seconds);
+    snprintf(buffer, buffer_size, "%02um:%02us", (unsigned)minutes, (unsigned)seconds);
 }
 
 static void update_profile_selection(size_t selected_index) {
@@ -146,7 +146,7 @@ static lv_obj_t* create_profile_card(lv_obj_t* base, const profile_t* profile, s
     char duration_buffer[16];
 
     format_duration(profile_estimated_time_ms(profile), duration_buffer, sizeof(duration_buffer));
-    snprintf(details_buffer, sizeof(details_buffer), "Max: %.1f Est: %s", profile_max_temperature_c(profile), duration_buffer);
+    snprintf(details_buffer, sizeof(details_buffer), "Max:%.1f°C Est:%s", profile_max_temperature_c(profile), duration_buffer);
 
     lv_obj_t* card = lv_btn_create(base);
     lv_obj_set_width(card, LV_PCT(100));
