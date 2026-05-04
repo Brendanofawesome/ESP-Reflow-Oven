@@ -13,6 +13,7 @@ typedef struct ui_t {
     lv_obj_t* target_temperature_label;
     lv_obj_t* content;
     const profile_t* selected_profile;
+    bool active;
 } ui_t;
 
 #define TOPBAR_HEIGHT 50
