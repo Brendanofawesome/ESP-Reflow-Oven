@@ -15,6 +15,8 @@
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
 
+#include "esp_timer.h"
+
 //UI
 #include "display_driver.h" //custom display initializer
 #include "lvgl_port.h" //custom lvgl library
@@ -24,8 +26,18 @@
 //temperature sensor
 #include "max_31856_driver.h" //custom
 
-//zero-crossing detection
-#include <driver/pulse_cnt.h>
+#include "profile.h"
+
+#include "PID.h"
+
+static const char* LOG_TAG = "app_main";
+
+//global variables
+max_31856_t temperature_sensor;
+ui_t ui_struct;
+
+_Atomic float target_temperature;
+_Atomic float current_hotside_temperature;
 
 // SPI pin definitions
 //BUS2: Display
@@ -51,21 +63,124 @@
 #define TOUCH_INT 36
 
 //Optocoupler
-#define OPTOCOUPLER_PIN 22
+#define HEATER_PIN 22
+// globals declared above
 
-static const char* LOG_TAG = "app_main";
+// Heater timer handler: runs at ~60Hz and performs PID computation and
+// phase-angle style output control
+static void Heater_Timer_Handler(lv_timer_t* timer) {
+    static int64_t last_time_us = 0;
+    static uint8_t prev_setpoint = 0;
+    static uint8_t prev_gpio_state = 0;
+    (void)timer;
 
-//global variables
-max_31856_t temperature_sensor;
-ui_t ui_struct;
-pcnt_unit_handle_t zero_cross_counter;
+    int64_t now = esp_timer_get_time(); // microseconds
+    uint32_t dt_ms = 100; // default if first run
+    if (last_time_us != 0) {
+        int64_t delta_us = now - last_time_us;
+        if (delta_us < 0) delta_us = 0;
+        dt_ms = (uint32_t)(delta_us / 1000);
+        if (dt_ms == 0) dt_ms = 1;
+    }
+    last_time_us = now;
 
-_Atomic float target_temperature;
+    // current temperatures
+    float cur = atomic_load_explicit(&current_hotside_temperature, memory_order_relaxed);
 
-//PID Callback
-bool PID_Trigger_calc(pcnt_unit_handle_t unit, const pcnt_watch_event_data_t *edata, void *user_ctx){
-    ESP_DRAM_LOGI(LOG_TAG, "Counted 255 Pulses!");
-    return true;
+    // manage profile-driven requested temperature
+    static const profile_t* running_profile = NULL;
+    static uint16_t chased_point_index = 0;
+    static int64_t point_start_time_us = 0;
+    static uint32_t point_start_temp_x128 = 0;
+
+    // detect start/stop transitions and profile changes
+    static bool prev_active = false;
+    bool now_active = ui_struct.active;
+    if (now_active && !prev_active) {
+        // starting run: capture current profile and temps
+        running_profile = ui_struct.selected_profile;
+        chased_point_index = 0;
+        point_start_time_us = esp_timer_get_time();
+        // convert current temperature to X128 fixed point
+        point_start_temp_x128 = (uint32_t)((cur) * 128.0f);
+    }
+    if (!now_active) {
+        running_profile = NULL;
+    }
+    prev_active = now_active;
+
+    float req = NAN;
+    if (running_profile != NULL && running_profile->points != NULL && chased_point_index < running_profile->num_points) {
+        // elapsed since this point started
+        int64_t now_us = esp_timer_get_time();
+        uint32_t elapsed_ms = 0;
+        if (point_start_time_us != 0) {
+            int64_t d = now_us - point_start_time_us;
+            if (d < 0) d = 0;
+            elapsed_ms = (uint32_t)(d / 1000);
+        }
+
+        key_point_t* next_point = &running_profile->points[chased_point_index];
+        uint32_t target_x128 = get_target_temperature(elapsed_ms, point_start_temp_x128, next_point);
+        req = (float)target_x128 / 128.0f;
+
+        // check if point satisfied; if so, advance
+        key_point_t* maybe = next_point_if_satisfied(elapsed_ms, (uint32_t)(cur * 128.0f), (profile_t*)running_profile, chased_point_index);
+        if (maybe != next_point) {
+            // advance index
+            if ((size_t)(chased_point_index + 1) < running_profile->num_points) {
+                chased_point_index++;
+                // reset start time and temp for next point
+                point_start_time_us = now_us;
+                point_start_temp_x128 = (uint32_t)(req * 128.0f);
+            } else {
+                // finished profile
+                ui_struct.active = false;
+                running_profile = NULL;
+            }
+        }
+    } else {
+        ui_struct.active = false;
+    }
+
+    uint8_t setpoint = get_PID_setpoint((uint32_t)req, (uint32_t)cur, 0, dt_ms, prev_setpoint);
+
+    // software-driven phase counter (0..255) advanced by the timer
+    static uint8_t phase_counter = 0;
+    phase_counter++; // wraps naturally from 255 -> 0
+
+    //ESP_LOGI(LOG_TAG, "PID Setpoint: %d (phase: %d/255), Req: %.2f°C, Cur: %.2f°C", setpoint, phase_counter, req, cur);
+
+    if (ui_struct.active) {
+        // when the phase counter reaches top (255) assert heater drive
+        if (phase_counter == 255) {
+            if (prev_gpio_state != 1) {
+                ESP_LOGI(LOG_TAG, "Heater ON (GPIO set to 1)");
+                prev_gpio_state = 1;
+            }
+            gpio_set_level(HEATER_PIN, 1);
+        }
+        // when the phase counter reaches the PID setpoint, turn off
+        if (setpoint != 255 && phase_counter == setpoint) {
+            if (prev_gpio_state != 0) {
+                ESP_LOGI(LOG_TAG, "Heater OFF (GPIO set to 0)");
+                prev_gpio_state = 0;
+            }
+            gpio_set_level(HEATER_PIN, 0);
+        }
+    } else {
+        // ensure heater off when not active
+        if (prev_gpio_state != 0) {
+            ESP_LOGI(LOG_TAG, "Heater OFF (not active)");
+            prev_gpio_state = 0;
+        }
+        gpio_set_level(HEATER_PIN, 0);
+    }
+
+    prev_setpoint = setpoint;
+
+    // publish requested temperature for UI
+    atomic_store_explicit(&target_temperature, req, memory_order_relaxed);
 }
 
 //LVGL temperature timer task
@@ -80,6 +195,9 @@ void UI_Update_Temperatures(lv_timer_t* timer){
     float target_temp = atomic_load_explicit(&target_temperature, memory_order_relaxed);
 
     ESP_LOGD(LOG_TAG, "Read Current Temperature: %3.2f°C, flags: 0x%02x", last_hotside_temp, flags);
+
+    // publish current temperature for PID callback
+    atomic_store_explicit(&current_hotside_temperature, last_hotside_temp, memory_order_relaxed);
 
     ui_set_target_temperature(&ui_struct, target_temp);
     ui_set_current_temperature(&ui_struct, last_hotside_temp, flags);
@@ -109,7 +227,11 @@ static void touch_event_debug_handler(lv_event_t *e){
 
 void app_main(void)
 {
+    gpio_set_level(22, 0);
+    gpio_set_direction(22, GPIO_MODE_OUTPUT);
+
     atomic_init(&target_temperature, NAN);
+    atomic_init(&current_hotside_temperature, NAN);
 
     display_controller_config_t display_config = {
         .device_handle = NULL,
@@ -188,74 +310,22 @@ void app_main(void)
     //create the temperature update timer
     ESP_LOGI(LOG_TAG, "attatching the temperature monitor");
     lv_timer_t* temp_timer = lv_timer_create(UI_Update_Temperatures, 1000/3, NULL);
-    lvgl_port_unlock();
 
     if (temp_timer == NULL) {
         ESP_LOGE(LOG_TAG, "Failed to create temperature update timer");
+        lvgl_port_unlock();
         return;
     }
 
-    //configure the zero-cross detector using PCNT peripheral
-    ESP_LOGI(LOG_TAG, "creating the zero-cross detector");
-    pcnt_unit_config_t unit_config = {
-        .low_limit = -1,
-        .high_limit = 255,
-        .flags = {
-            .accum_count = false
-        },
-        .intr_priority = 0,
-    };
-    ret = pcnt_new_unit(&unit_config, &zero_cross_counter);
-    if(ret != ESP_OK){
-        ESP_LOGE(LOG_TAG, "Failed to create PCNT unit: %s", esp_err_to_name(ret));
+    // create heater control timer (~60Hz)
+    lv_timer_t* heater_timer = lv_timer_create(Heater_Timer_Handler, 17, NULL);
+    if (heater_timer == NULL) {
+        ESP_LOGE(LOG_TAG, "Failed to create heater timer");
+        lvgl_port_unlock();
+        return;
     }
 
-    ret = pcnt_unit_add_watch_point(zero_cross_counter, 255);
-    if (ret != ESP_OK) {
-        ESP_LOGE(LOG_TAG, "Failed to add PCNT watch point: %s", esp_err_to_name(ret));
-    }
-
-        gpio_config_t io = {
-        .pin_bit_mask = 1ULL << OPTOCOUPLER_PIN,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,   // often needed for optocoupler outputs
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    ESP_ERROR_CHECK(gpio_config(&io));
-
-    pcnt_channel_handle_t pcnt_chan = NULL;
-    pcnt_chan_config_t chan_config = {
-        .edge_gpio_num = OPTOCOUPLER_PIN,
-        .level_gpio_num = -1,
-        .flags = {
-            .virt_level_io_level = 0
-        }
-    };
-    ret = pcnt_new_channel(zero_cross_counter, &chan_config, &pcnt_chan);
-    if(ret != ESP_OK){
-        ESP_LOGE(LOG_TAG, "Failed to create PCNT channel: %s", esp_err_to_name(ret));
-    }
-
-    ret = pcnt_channel_set_edge_action(pcnt_chan, PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_INCREASE);
-    if(ret != ESP_OK){
-        ESP_LOGE(LOG_TAG, "Failed to set PCNT channel edge action: %s", esp_err_to_name(ret));
-    }
-
-    pcnt_event_callbacks_t PID_callback = {.on_reach = PID_Trigger_calc};
-    ret = pcnt_unit_register_event_callbacks(zero_cross_counter, &PID_callback, NULL);
-    if(ret != ESP_OK){
-        ESP_LOGE(LOG_TAG, "Failed to register PCNT event callbacks: %s", esp_err_to_name(ret));
-    }
-
-    ESP_LOGI(LOG_TAG, "Configured pulse counter, starting...");
-
-    pcnt_unit_clear_count(zero_cross_counter);
-    pcnt_unit_enable(zero_cross_counter);
-    ret = pcnt_unit_start(zero_cross_counter);
-    if(ret != ESP_OK){
-        ESP_LOGE(LOG_TAG, "Failed to start PCNT unit: %s", esp_err_to_name(ret));
-    }
+    lvgl_port_unlock();
 
 
     ESP_LOGI(LOG_TAG, "LVGL worker running; app_main entering watchdog loop");

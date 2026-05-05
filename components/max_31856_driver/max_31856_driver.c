@@ -401,6 +401,14 @@ float max_31856_get_temperature_c(max_31856_t* max_31856, uint8_t* flags, float*
     return (float)atomic_load_explicit(&max_31856->last_hotside_temp_reading, memory_order_relaxed) / 128.0;
 }
 
+uint32_t max_31856_get_temperature_raw(max_31856_t* max_31856, uint8_t* flags, float* cold_junction_temp){
+    if(max_31856 == NULL) return 0;
+
+    if(flags != NULL) *flags = atomic_load_explicit(&max_31856->last_flags_reading, memory_order_relaxed);
+    if(cold_junction_temp != NULL) *cold_junction_temp = atomic_load_explicit(&max_31856->last_coldside_temp_reading, memory_order_relaxed) / 2.0;
+    return (float)atomic_load_explicit(&max_31856->last_hotside_temp_reading, memory_order_relaxed);
+}
+
 uint8_t max_31856_get_status(max_31856_t* max_31856){
     if(max_31856 == NULL) return ~0;
 

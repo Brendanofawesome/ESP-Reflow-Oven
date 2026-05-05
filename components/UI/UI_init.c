@@ -9,7 +9,7 @@
 #include "run_screen.c"
 #include "settings_screen.c"
 
-const char* LOG_TAG = "UI_Controller";
+static const char* LOG_TAG = "UI_Controller";
 
 esp_err_t ui_init(ui_t* ui_data){
     if(ui_data == NULL){
