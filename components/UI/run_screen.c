@@ -1,13 +1,32 @@
 #include "UI.h"
+#include "stdio.h"
+#include "stdlib.h"
 
-void initialize_run_screen(lv_obj_t* base, ui_t* ui_data){
-    lv_obj_set_layout(base, LV_LAYOUT_FLEX);
-    lv_obj_set_flex_flow(base, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_scroll_dir(base, LV_DIR_NONE);
 
-    lv_obj_set_style_pad_all(base, 12, 0);
-    lv_obj_set_style_pad_row(base, 10, 0);
-    lv_obj_set_style_bg_color(base, lv_color_hex(0x10151F), 0);
+typedef struct run_screen_state_t {
+    ui_t* ui_data;
+    lv_obj_t* status_label;
+    lv_obj_t* run_time;
+    lv_obj_t* target_temp;
+    lv_obj_t* elapsed_time;
 
-    ui_data->active = false;
-}
+    lv_obj_t* stop_button;
+
+
+ 
+} run_screen_state_t; 
+
+static run_screen_state_t run_screen_state = {
+    .ui_data = NULL,
+    .status_label = NULL,
+    .profile_label = NULL,
+    .current_temp_label = NULL,
+    .target_temp_label = NULL,
+    .elapsed_time_label = NULL,
+    .stop_button = NULL,
+    .active_profile_index = 0,
+    .is_running = false,
+};
+
+
+
